@@ -64,6 +64,17 @@ zdoid each time. It's only treated as an actual join (roster addition +
 announcement) the first time that zdoid is seen; a repeat is recognized as
 a respawn and updates state silently without re-announcing.
 
+Every character load - fresh join *and* respawn alike - actually prints
+this line twice, ~8 seconds apart: first a placeholder with zdoid exactly
+`0` (`Got character ZDOID from X : 0:0`), then the real, stable zdoid once
+the character finishes loading. Both matched the same regex and, before
+being filtered out, both looked like a "new" player to the respawn check
+above - the placeholder's `0` had never been seen before either, so it
+fired its own spurious join, doubling every respawn announcement.
+Confirmed against real logs (not just inferred): the placeholder is
+always exactly `0`, the real zdoid never is (they're large
+effectively-random numbers).
+
 When a leave is ambiguous (2+ players tracked, no precise attribution),
 the *oldest*-tracked player is guessed and removed so the roster count
 stays right immediately; the announcement itself stays generic ("A player

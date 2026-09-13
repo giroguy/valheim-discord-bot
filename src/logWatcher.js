@@ -193,6 +193,17 @@ export class LogWatcher extends EventEmitter {
 
     if ((m = line.match(JOIN_RE))) {
       const [, name, zdoid] = m;
+      // Every character load (fresh join AND respawn alike) actually
+      // prints this line twice, ~8s apart: first a placeholder with
+      // zdoid exactly "0" ("Got character ZDOID from X : 0:0"), then the
+      // real, stable zdoid once the character finishes loading. Confirmed
+      // against real logs: the placeholder is always exactly "0", the
+      // real zdoid never is (they're large effectively-random numbers).
+      // Not filtering this out was the actual cause of doubled "joined
+      // the server" announcements on respawn - the placeholder looked
+      // like a brand-new never-seen player just like the real one did.
+      if (zdoid === "0") return;
+
       // This line isn't unique to a fresh connection - it also fires on
       // respawn after death (and likely portal travel), reusing the same
       // zdoid each time (confirmed: it's the same "owner" id referenced by
