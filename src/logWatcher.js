@@ -43,23 +43,62 @@ const JOIN_CODE_RE = /Created new join code (\d+) for session/;
 // like "ZPlayFabSocket::Dispose. State: CONNECTED", have no timestamp).
 const TIMESTAMP_RE = /^(\d{2})\/(\d{2})\/(\d{4}) (\d{2}):(\d{2}):(\d{2}):/;
 
-function parseTimestamp(line) {
+// Timezone-correct wall-clock -> UTC conversion, done via Intl numeric
+// formatting only (no Date string-parsing, which is environment-dependent
+// - an earlier version of this used a string-parse trick that silently
+// gave wrong results depending on the *runtime's own* system timezone).
+function getTimezoneOffsetMs(date, timeZone) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = Object.fromEntries(
+    dtf.formatToParts(date).map((p) => [p.type, p.value])
+  );
+  const asUTC = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second
+  );
+  return asUTC - date.getTime();
+}
+
+function zonedTimeToUtc(y, mo, d, h, mi, s, timeZone) {
+  const utcGuess = Date.UTC(y, mo, d, h, mi, s);
+  const offset = getTimezoneOffsetMs(new Date(utcGuess), timeZone);
+  return new Date(utcGuess - offset);
+}
+
+function parseTimestamp(line, timeZone) {
   const m = line.match(TIMESTAMP_RE);
   if (!m) return null;
   const [, month, day, year, hour, minute, second] = m;
-  // Constructed naively (no timezone applied) - fine here, since replay
-  // only ever compares this against another timestamp parsed the exact
-  // same way from the same log, never against the bot container's own
-  // system clock. Any timezone offset cancels out in that comparison.
-  return new Date(year, month - 1, day, hour, minute, second);
+  // The log's timestamps carry no timezone of their own - they're in
+  // whatever TZ the game server container is configured with. Converting
+  // properly (rather than comparing naively, or not comparing against
+  // wall-clock at all) is what lets the replay window use actual current
+  // time as its cutoff: a log that's gone stale (nothing appended in
+  // hours) correctly stops being "recent" instead of the window staying
+  // frozen relative to the log's own last-ever timestamp forever.
+  return zonedTimeToUtc(year, month - 1, day, hour, minute, second, timeZone);
 }
 
 const REPLAY_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 export class LogWatcher extends EventEmitter {
-  constructor(logPath) {
+  constructor(logPath, timeZone = "UTC") {
     super();
     this.logPath = logPath;
+    this.timeZone = timeZone;
     // zdoid -> player name, for players we currently believe are connected
     this.players = new Map();
     // Timestamp of the last precise (zdoid-attributed) removal, so the
@@ -108,24 +147,24 @@ export class LogWatcher extends EventEmitter {
     // uninterrupted session could accumulate a large log, and the further
     // back replay reaches, the more a single missed-parse edge case (see
     // the ambiguous-leave heuristic below) could leave a permanent "ghost"
-    // entry rather than a self-correcting recent one. Window is relative
-    // to the log's own last timestamp, not "now" by the bot's clock - see
-    // parseTimestamp.
-    let lastTimestamp = null;
-    for (let i = lines.length - 1; i >= 0 && !lastTimestamp; i--) {
-      lastTimestamp = parseTimestamp(lines[i]);
-    }
-    const cutoff = lastTimestamp
-      ? new Date(lastTimestamp.getTime() - REPLAY_WINDOW_MS)
-      : null;
+    // entry rather than a self-correcting recent one. Cutoff is actual
+    // wall-clock time, not relative to the log's own last timestamp - a
+    // log that's gone stale (nothing appended in hours, e.g. a dev/test
+    // log nobody's writing to anymore) needs to stop being "recent" as
+    // real time passes, not stay frozen in its own last-observed moment
+    // forever. Confirmed this was a real bug, not just theoretical: it's
+    // exactly what caused old test join-code lines to replay and
+    // re-announce on every subsequent restart of a stale local test log,
+    // days after they were first written.
+    const cutoff = new Date(Date.now() - REPLAY_WINDOW_MS);
 
     let current = null;
     for (const line of lines) {
-      current = parseTimestamp(line) ?? current;
+      current = parseTimestamp(line, this.timeZone) ?? current;
       // No timestamp seen yet, or no timestamp anywhere in the file at
       // all: skip rather than guess: real join/leave/version/join-code
       // lines always carry one in practice.
-      if (!current || (cutoff && current < cutoff)) continue;
+      if (!current || current < cutoff) continue;
       this._handleLine(line, { silent: true });
     }
 

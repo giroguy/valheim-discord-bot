@@ -94,10 +94,25 @@ to a recent window (`REPLAY_WINDOW_MS`, 6h by default) rather than the
 whole file: a long uninterrupted session could accumulate a large log, and
 replaying further back increases the chance a single missed-parse edge
 case (see the ambiguous-leave heuristic above) leaves a permanent "ghost"
-entry rather than a self-correcting recent one. The window is computed
-relative to the log's own last timestamp, not the bot container's system
-clock, so it's unaffected by any timezone mismatch between the two
-containers.
+entry rather than a self-correcting recent one.
+
+The cutoff is real wall-clock time (`Date.now()`), with log timestamps
+(which carry no timezone of their own - whatever the game server
+container's `TZ` is) converted to true UTC via `Intl`-based numeric
+formatting for the comparison (`zonedTimeToUtc` - deliberately not
+`Date`'s own local-string parsing, which silently gives wrong answers
+depending on the *runtime's* own system timezone, not the target one -
+caught this the hard way in testing). An earlier version computed the
+cutoff relative to the log's own last timestamp instead, specifically to
+sidestep needing timezone-aware conversion at all - but that meant a log
+that goes stale (nothing appended in hours, e.g. a dev/test log nobody's
+writing to anymore) never actually ages out: the window stays frozen
+relative to whatever the log's last-ever line happened to be, forever.
+Confirmed in production: a stale local test log with lines from the
+*previous day* re-triggered "New join code" announcements on every
+subsequent bot restart, no matter how much real time had passed, because
+those lines were still "within 6 hours" of the log's own frozen last
+timestamp.
 
 Version and join code are also replayed (not silenced - unlike join/leave,
 their own handlers in `index.js` already gate on *change*, so replaying

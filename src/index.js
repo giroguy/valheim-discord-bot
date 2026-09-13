@@ -64,8 +64,23 @@ function saveJoinCode(code) {
   }
 }
 
+// Read once at startup so the replay window (see LogWatcher) can convert
+// log timestamps (which carry no timezone of their own) to real UTC for
+// comparison against actual current time. Falls back to UTC if the env
+// file isn't readable yet - safe (just means the replay cutoff may be off
+// by a few hours until the mount is available), not a hard failure.
+let gameServerTimezone = "UTC";
+try {
+  gameServerTimezone = parseEnvFile(VALHEIM_ENV_PATH).TZ || "UTC";
+} catch (err) {
+  console.warn(
+    `Could not read ${VALHEIM_ENV_PATH} for timezone, defaulting to UTC:`,
+    err.message
+  );
+}
+
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-const watcher = new LogWatcher(VALHEIM_LOG_PATH);
+const watcher = new LogWatcher(VALHEIM_LOG_PATH, gameServerTimezone);
 
 function mentionPrefix() {
   return resolveRoleMention(client, UPDATE_MENTION_ROLE_ID);
