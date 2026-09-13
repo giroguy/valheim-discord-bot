@@ -1,0 +1,16 @@
+{
+  "name": "valheim-discord-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "cron-parser": "^5.10.0",
+    "cronstrue": "^3.26.0",
+    "discord.js": "^14.14.1",
+    "dockerode": "^4.0.2"
+  }
+}

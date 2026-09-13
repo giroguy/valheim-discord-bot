@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Secrets and per-deployment config - never commit these
+.env
+valheim-bot.env
+
+# Persisted runtime state (per-deployment, not source)
+data/
+
+# npm
+npm-debug.log*
+.npm
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp

@@ -1,0 +1,30 @@
+services:
+  valheim-bot:
+    build: .
+    container_name: ${BOT_CONTAINER_NAME:-valheim-bot}
+    restart: always
+    env_file:
+      - ./valheim-bot.env
+    volumes:
+      # Read-only tail of the valheim project's log file - lives in a
+      # separate compose project now, so this is a host path rather than a
+      # relative one shared by both services in a single compose file.
+      # Override via VALHEIM_LOG_HOST_PATH in this project's own .env file
+      # (compose-level interpolation, not valheim-bot.env) when the two
+      # projects aren't laid out as siblings, e.g. on the actual deploy host.
+      - ${VALHEIM_LOG_HOST_PATH:-../your-valheim-server/valheim/server/logs}:/logs:ro
+      # Read-only access to the game server's own env file, so /schedule can
+      # read AUTO_UPDATE_SCHEDULE/AUTO_BACKUP_SCHEDULE/etc directly - see
+      # src/envFile.js. Same override mechanism as the log path above.
+      - ${VALHEIM_ENV_HOST_PATH:-../your-valheim-server/valheim-fullmonty.env}:/config/valheim.env:ro
+      # Persists last-known version/join code across bot restarts - see
+      # VERSION_STATE_PATH / JOIN_CODE_STATE_PATH in src/index.js.
+      - ./data:/data
+      # Grants container control (restart via /restart) - and, as a
+      # consequence, root-equivalent access to the whole Docker host, not
+      # just this one container. Access to /restart itself is gated to
+      # ADMIN_ROLE_ID inside the bot, but this mount is the trust boundary
+      # to be aware of. Works regardless of which compose project owns the
+      # target container - dockerode talks to the daemon directly by
+      # container name (VALHEIM_CONTAINER_NAME), not through compose.
+      - /var/run/docker.sock:/var/run/docker.sock
