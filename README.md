@@ -73,6 +73,16 @@ drifted. This is inherent to log-scraping without a working query
 protocol - good enough for a small friend/community server, not perfect
 under simultaneous joins/leaves.
 
+One consequence of that heuristic occasionally guessing wrong: it can
+evict the wrong player, leaving the one who *actually* disconnected
+stranded in the roster under their old zdoid. If that player reconnects
+before anything else corrects it, they'd get a second entry under their
+new zdoid - same name twice. Self-healed on join: a fresh connection
+always gets a brand-new zdoid (never reuses an old one, unlike a
+respawn), so if a join comes in for a name already tracked under a
+*different* zdoid, that old entry is provably stale (the same person
+can't have two live sessions) and gets dropped.
+
 `tail -n 0 -F` only ever sees lines appended *after* the tail process
 starts - on its own, that means every bot restart would silently reset the
 roster to empty even if the game server (and its players) never went

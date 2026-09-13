@@ -161,6 +161,21 @@ export class LogWatcher extends EventEmitter {
       // don't already believe this zdoid is connected - otherwise it's a
       // respawn, and re-announcing "joined the server" for it is wrong.
       const isRespawn = this.players.has(zdoid);
+      if (!isRespawn) {
+        // A fresh connection always gets a brand-new zdoid, never reusing
+        // an old one - so if this name is already tracked under a
+        // *different* zdoid, that old entry must be stale (most likely
+        // the ambiguous-leave heuristic below guessing wrong and evicting
+        // someone else instead of this player when they actually
+        // disconnected). The same person can't have two live sessions at
+        // once, so it's always safe to drop the stale entry rather than
+        // let the roster show the same name twice.
+        for (const [oldZdoid, oldName] of this.players) {
+          if (oldName === name && oldZdoid !== zdoid) {
+            this.players.delete(oldZdoid);
+          }
+        }
+      }
       this.players.set(zdoid, name);
       if (!isRespawn && !silent) {
         this.emit("join", { name, players: this.currentNames() });
