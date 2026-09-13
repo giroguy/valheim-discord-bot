@@ -164,6 +164,19 @@ the whole bot down until `restart: always` brought it back ~2 seconds
 later - during which player tracking and webhook posting were also down,
 not just that one command.
 
+The try/catch stops it from crashing the bot, but the underlying
+`Unknown interaction` can still happen - Discord only gives 3 seconds to
+send an initial reply, and that budget can run out from ordinary network
+latency alone, independent of how fast a command's own logic is (`/players`
+is a trivial in-memory read - not blocking, not the cause). So every
+command now acks with `deferReply()` as the very first thing (before any
+other work), which only has to beat that same 3-second window itself but,
+being an empty ack, essentially always does - and then has up to 15
+minutes to send the real content via `editReply()`. Confirmed this
+actually recurred in production even with the try/catch already in place
+(same command, same error code, a few hours later) - the defer-first
+change is the actual fix, not just damage control.
+
 ## Restart mechanism and its trust boundary
 
 `/restart` mounts `/var/run/docker.sock` into the bot container and calls

@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { Client, GatewayIntentBits } from "discord.js";
+import { Client, GatewayIntentBits, MessageFlags } from "discord.js";
 import { LogWatcher } from "./logWatcher.js";
 import { restartContainer } from "./dockerControl.js";
 import { commands, registerCommands } from "./commands.js";
@@ -173,7 +173,7 @@ client.on("interactionCreate", async (interaction) => {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply(payload);
       } else {
-        await interaction.reply({ ...payload, ephemeral: true });
+        await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
       }
     } catch {
       // Interaction may genuinely be unrecoverable at this point (e.g.
@@ -183,17 +183,49 @@ client.on("interactionCreate", async (interaction) => {
 });
 
 async function handleCommand(interaction) {
+  if (interaction.commandName === "restart") {
+    // Role check first (in-memory, instant) so we know whether this
+    // reply needs to be ephemeral before acking - ephemeral is set at
+    // defer time, can't be changed on the later edit.
+    const hasRole = memberHasRole(interaction.member, ADMIN_ROLE_ID);
+    await interaction.deferReply(
+      hasRole ? {} : { flags: MessageFlags.Ephemeral }
+    );
+    if (!hasRole) {
+      await interaction.editReply("You don't have permission to do that.");
+      return;
+    }
+    await interaction.editReply(`${mentionPrefix()}Restarting the server...`);
+    try {
+      await restartContainer(VALHEIM_CONTAINER_NAME);
+    } catch (err) {
+      console.error("Restart failed:", err);
+      await interaction.followUp("Restart failed — check bot logs.");
+    }
+    return;
+  }
+
+  // Every other command: ack immediately, before any other work. This
+  // only needs to beat Discord's 3-second window (it's just an ack, no
+  // content yet), and buys up to 15 minutes for the real reply via
+  // editReply below - makes every command resistant to a transient
+  // delay (ours or Discord's) instead of racing a 3-second budget every
+  // time. Confirmed necessary in production: /players (whose own logic
+  // is a trivial in-memory read, nothing slow) still hit an "Unknown
+  // interaction" failure once - see README's Crash resilience section.
+  await interaction.deferReply();
+
   if (interaction.commandName === "help") {
     // Built from the same `commands` list used to register them, so this
     // can't drift out of sync when a command gets added/renamed.
     const lines = commands.map((c) => `\`/${c.name}\` — ${c.description}`);
-    await interaction.reply(lines.join("\n"));
+    await interaction.editReply(lines.join("\n"));
     return;
   }
 
   if (interaction.commandName === "players") {
     const names = watcher.currentNames();
-    await interaction.reply(
+    await interaction.editReply(
       names.length
         ? `**${names.length}** player(s) online: ${names.join(", ")}`
         : "No players currently online."
@@ -202,7 +234,7 @@ async function handleCommand(interaction) {
   }
 
   if (interaction.commandName === "version") {
-    await interaction.reply(
+    await interaction.editReply(
       lastKnownVersion
         ? `Server is running Valheim version \`${lastKnownVersion}\``
         : "Version not yet observed since the bot started."
@@ -234,10 +266,10 @@ async function handleCommand(interaction) {
           tz
         ),
       ];
-      await interaction.reply(lines.join("\n"));
+      await interaction.editReply(lines.join("\n"));
     } catch (err) {
       console.error("Failed to read schedule config:", err);
-      await interaction.reply(
+      await interaction.editReply(
         "Couldn't read the server's schedule config right now."
       );
     }
@@ -245,30 +277,11 @@ async function handleCommand(interaction) {
   }
 
   if (interaction.commandName === "connect") {
-    await interaction.reply(
+    await interaction.editReply(
       lastJoinCode
         ? `Current join code: \`${lastJoinCode}\``
         : "Join code not yet observed since the bot started."
     );
-    return;
-  }
-
-  if (interaction.commandName === "restart") {
-    const hasRole = memberHasRole(interaction.member, ADMIN_ROLE_ID);
-    if (!hasRole) {
-      await interaction.reply({
-        content: "You don't have permission to do that.",
-        ephemeral: true,
-      });
-      return;
-    }
-    await interaction.reply(`${mentionPrefix()}Restarting the server...`);
-    try {
-      await restartContainer(VALHEIM_CONTAINER_NAME);
-    } catch (err) {
-      console.error("Restart failed:", err);
-      await interaction.followUp("Restart failed — check bot logs.");
-    }
     return;
   }
 }
