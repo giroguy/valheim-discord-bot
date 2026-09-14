@@ -8,8 +8,17 @@ export const commands = [
     .setName("version")
     .setDescription("Show the Valheim server's currently running version"),
   new SlashCommandBuilder()
+    .setName("status")
+    .setDescription("Show whether the server is online or offline"),
+  new SlashCommandBuilder()
     .setName("restart")
     .setDescription("Restart the Valheim server container (admin only)"),
+  new SlashCommandBuilder()
+    .setName("start")
+    .setDescription("Start the Valheim server container if it's stopped (admin only)"),
+  new SlashCommandBuilder()
+    .setName("stop")
+    .setDescription("Stop the Valheim server container (admin only)"),
   new SlashCommandBuilder()
     .setName("schedule")
     .setDescription("Show the next scheduled auto-update/auto-backup times"),

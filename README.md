@@ -15,11 +15,14 @@ file, and the game server's own env file) plus the Docker socket for
 | Command | What it does | Access |
 |---|---|---|
 | `/help` | Lists all commands | anyone |
-| `/players` | Who's currently online (from log-based tracking) | anyone |
+| `/status` | Whether the server is online or offline, plus player count if online | anyone |
+| `/players` | Who's currently online (from log-based tracking) - also reports offline instead of a misleading "no players" if the container isn't running | anyone |
 | `/version` | Last observed Valheim version | anyone |
 | `/connect` | Current join code (works for Steam/Xbox/PlayStation) | anyone |
 | `/schedule` | Next auto-update/auto-backup/scheduled-restart times, human-readable | anyone |
-| `/restart` | Restarts the game server container via the Docker socket | `ADMIN_ROLE_ID` only |
+| `/restart` | Restarts the game server container (or starts it, with accurate messaging, if it was stopped rather than running) | `ADMIN_ROLE_ID` only |
+| `/start` | Starts the container if it's stopped | `ADMIN_ROLE_ID` only |
+| `/stop` | Stops the container | `ADMIN_ROLE_ID` only |
 
 Join/leave, version-change, and join-code-change events also post
 proactively to `DISCORD_WEBHOOK_URL` as they happen - no command needed.
@@ -215,15 +218,31 @@ change is the actual fix, not just damage control.
 
 ## Restart mechanism and its trust boundary
 
-`/restart` mounts `/var/run/docker.sock` into the bot container and calls
-the Docker API directly (`src/dockerControl.js`) - this works regardless of
-which compose project owns the target container, since it talks to the
-daemon by container name (`VALHEIM_CONTAINER_NAME`), not through Compose.
+`/restart`, `/start`, `/stop`, and `/status` mount `/var/run/docker.sock`
+into the bot container and call the Docker API directly
+(`src/dockerControl.js`) - this works regardless of which compose project
+owns the target container, since it talks to the daemon by container name
+(`VALHEIM_CONTAINER_NAME`), not through Compose.
 
 Worth knowing: any process with Docker socket access has root-equivalent
-control over the whole host, not just this one container. `/restart`
-itself is gated to `ADMIN_ROLE_ID`, but that mount is the actual trust
-boundary.
+control over the whole host, not just this one container. The commands
+that change state are gated to `ADMIN_ROLE_ID`, but that mount is the
+actual trust boundary.
+
+`getContainerStatus` throwing with `statusCode === 404` specifically means
+the container doesn't exist at all - e.g. removed via `docker compose
+down`, not just stopped - and none of `start`/`stop`/`restart` can recreate
+that (only `docker compose up` on the host can), so `describeDockerError`
+says so explicitly rather than a generic failure. This was the actual gap
+that prompted adding all of this: `/restart` used to just say "Restart
+failed - check bot logs" for every failure, including this one, with no
+way to tell from Discord alone what had actually gone wrong. Confirmed via
+direct testing (not just inferred) that `start()`/`stop()` throw a
+harmless 304 on an already-running/-stopped container (handled as a no-op)
+and that `restart()` actually succeeds even on a stopped container - the
+`/restart` handler still checks status first anyway, purely so its
+progress message says "starting" instead of the misleading "restarting"
+when the server was actually off.
 
 ## Multiple servers
 

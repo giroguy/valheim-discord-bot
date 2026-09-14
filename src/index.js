@@ -1,7 +1,12 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { Client, GatewayIntentBits, MessageFlags } from "discord.js";
 import { LogWatcher } from "./logWatcher.js";
-import { restartContainer } from "./dockerControl.js";
+import {
+  restartContainer,
+  startContainer,
+  stopContainer,
+  getContainerStatus,
+} from "./dockerControl.js";
 import { commands, registerCommands } from "./commands.js";
 import { memberHasRole, resolveRoleMention } from "./roles.js";
 import { parseEnvFile } from "./envFile.js";
@@ -197,25 +202,92 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+// Shared by restart/start/stop: role check first (in-memory, instant) so
+// we know whether the reply needs to be ephemeral before acking -
+// ephemeral is set at defer time, can't be changed on a later edit.
+// Returns true if the caller is allowed and the interaction is deferred;
+// false means an ephemeral "no permission" reply was already sent and the
+// caller should stop.
+async function requireAdmin(interaction) {
+  const hasRole = memberHasRole(interaction.member, ADMIN_ROLE_ID);
+  await interaction.deferReply(
+    hasRole ? {} : { flags: MessageFlags.Ephemeral }
+  );
+  if (!hasRole) {
+    await interaction.editReply("You don't have permission to do that.");
+    return false;
+  }
+  return true;
+}
+
+// Shared by restart/start/stop/status: a 404 means the container doesn't
+// exist at all (e.g. removed via `docker compose down`, not just
+// stopped) - dockerode's start/stop/restart can't recreate that, only
+// the host running `docker compose up` can, so say so plainly instead of
+// a generic failure. Every other error's own message gets surfaced too -
+// no more "check bot logs" as the only signal for what actually happened.
+function describeDockerError(err) {
+  if (err.statusCode === 404) {
+    return "Server container doesn't exist — it needs to be recreated on the host (`docker compose up -d`), not something I can do remotely.";
+  }
+  return `Error talking to the server container: ${err.message}`;
+}
+
 async function handleCommand(interaction) {
   if (interaction.commandName === "restart") {
-    // Role check first (in-memory, instant) so we know whether this
-    // reply needs to be ephemeral before acking - ephemeral is set at
-    // defer time, can't be changed on the later edit.
-    const hasRole = memberHasRole(interaction.member, ADMIN_ROLE_ID);
-    await interaction.deferReply(
-      hasRole ? {} : { flags: MessageFlags.Ephemeral }
-    );
-    if (!hasRole) {
-      await interaction.editReply("You don't have permission to do that.");
-      return;
-    }
-    await interaction.editReply(`${mentionPrefix()}Restarting the server...`);
+    if (!(await requireAdmin(interaction))) return;
     try {
-      await restartContainer(VALHEIM_CONTAINER_NAME);
+      const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
+      if (status.running) {
+        await interaction.editReply(`${mentionPrefix()}Restarting the server...`);
+        await restartContainer(VALHEIM_CONTAINER_NAME);
+      } else {
+        // restart() would actually still work here (confirmed: Docker
+        // starts a stopped container on restart, no error) - but saying
+        // "restarting" when it was actually off is exactly the confusing
+        // messaging this command used to have. Say what's really happening.
+        await interaction.editReply(
+          `${mentionPrefix()}Server was stopped — starting it now...`
+        );
+        await startContainer(VALHEIM_CONTAINER_NAME);
+      }
     } catch (err) {
       console.error("Restart failed:", err);
-      await interaction.followUp("Restart failed — check bot logs.");
+      await interaction.editReply(describeDockerError(err));
+    }
+    return;
+  }
+
+  if (interaction.commandName === "start") {
+    if (!(await requireAdmin(interaction))) return;
+    try {
+      const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
+      if (status.running) {
+        await interaction.editReply("Server is already running.");
+        return;
+      }
+      await interaction.editReply(`${mentionPrefix()}Starting the server...`);
+      await startContainer(VALHEIM_CONTAINER_NAME);
+    } catch (err) {
+      console.error("Start failed:", err);
+      await interaction.editReply(describeDockerError(err));
+    }
+    return;
+  }
+
+  if (interaction.commandName === "stop") {
+    if (!(await requireAdmin(interaction))) return;
+    try {
+      const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
+      if (!status.running) {
+        await interaction.editReply("Server is already stopped.");
+        return;
+      }
+      await interaction.editReply(`${mentionPrefix()}Stopping the server...`);
+      await stopContainer(VALHEIM_CONTAINER_NAME);
+    } catch (err) {
+      console.error("Stop failed:", err);
+      await interaction.editReply(describeDockerError(err));
     }
     return;
   }
@@ -238,7 +310,44 @@ async function handleCommand(interaction) {
     return;
   }
 
+  if (interaction.commandName === "status") {
+    try {
+      const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
+      if (!status.running) {
+        await interaction.editReply(`Server is **offline** (${status.status}).`);
+        return;
+      }
+      const names = watcher.currentNames();
+      await interaction.editReply(
+        `Server is **online**. ` +
+          (names.length
+            ? `${names.length} player(s): ${names.join(", ")}`
+            : "No players currently online.")
+      );
+    } catch (err) {
+      console.error("Failed to get container status:", err);
+      await interaction.editReply(describeDockerError(err));
+    }
+    return;
+  }
+
   if (interaction.commandName === "players") {
+    // "No players online" is ambiguous between "server's up but empty"
+    // and "server's off entirely" - check status first so it's never
+    // read as the server being up when it isn't.
+    try {
+      const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
+      if (!status.running) {
+        await interaction.editReply(
+          `Server is currently **offline** (${status.status}).`
+        );
+        return;
+      }
+    } catch (err) {
+      console.error("Failed to get container status:", err);
+      await interaction.editReply(describeDockerError(err));
+      return;
+    }
     const names = watcher.currentNames();
     await interaction.editReply(
       names.length
