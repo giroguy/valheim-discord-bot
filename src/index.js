@@ -1,5 +1,10 @@
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { Client, GatewayIntentBits, MessageFlags } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  MessageFlags,
+  escapeMarkdown,
+} from "discord.js";
 import { LogWatcher } from "./logWatcher.js";
 import {
   restartContainer,
@@ -36,6 +41,17 @@ for (const [key, val] of Object.entries({
     console.error(`Missing required env var: ${key}`);
     process.exit(1);
   }
+}
+
+// Name matching is a convenience (see roles.js), but anyone who can create
+// roles can create one with the same name and pass the admin check - an
+// ID can't be spoofed that way.
+if (!/^\d+$/.test(ADMIN_ROLE_ID)) {
+  console.warn(
+    `ADMIN_ROLE_ID "${ADMIN_ROLE_ID}" is a role name, not an ID - any role ` +
+      "with that name grants /restart, /start and /stop. Use the numeric " +
+      "role ID to lock it down."
+  );
 }
 
 // Persisted across bot restarts so we only announce *changes*, not just
@@ -84,14 +100,30 @@ try {
   );
 }
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+// Player names come straight from the game, so a character named
+// "@everyone" (or containing a role mention) would otherwise ping the
+// whole server on every join - mentions are off by default, and only
+// re-enabled per message for our own UPDATE_MENTION_ROLE_ID prefix.
+const NO_MENTIONS = { parse: [] };
+const ROLE_MENTIONS = { parse: ["roles", "everyone"] };
+
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds],
+  allowedMentions: NO_MENTIONS,
+});
 const watcher = new LogWatcher(VALHEIM_LOG_PATH, gameServerTimezone);
 
 function mentionPrefix() {
   return resolveRoleMention(client, UPDATE_MENTION_ROLE_ID);
 }
 
-async function postMessage(content) {
+// Reply payload for messages that lead with mentionPrefix() - only ever
+// used for our own fixed text, never anything containing player names.
+function withMention(text) {
+  return { content: `${mentionPrefix()}${text}`, allowedMentions: ROLE_MENTIONS };
+}
+
+async function postMessage(content, { mention = false } = {}) {
   // Plain webhook POST, same mechanism as the existing curl-based hooks in
   // valheim-fullmonty.env - no bot channel permissions needed, since this
   // doesn't go through the gateway at all. The bot connection below is
@@ -99,7 +131,10 @@ async function postMessage(content) {
   const res = await fetch(DISCORD_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({
+      content,
+      allowed_mentions: mention ? ROLE_MENTIONS : NO_MENTIONS,
+    }),
   });
   if (!res.ok) {
     throw new Error(`Webhook POST failed: ${res.status} ${await res.text()}`);
@@ -116,7 +151,7 @@ client.on("error", (err) => {
   console.error("Discord client error:", err);
 });
 
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   console.log(`Logged in as ${client.user.tag}`);
   try {
     await registerCommands({
@@ -133,11 +168,13 @@ client.once("ready", async () => {
 });
 
 watcher.on("join", ({ name }) => {
-  postMessage(`**${name}** joined the server.`).catch(console.error);
+  postMessage(`**${escapeMarkdown(name)}** joined the server.`).catch(
+    console.error
+  );
 });
 
 watcher.on("leave", ({ name }) => {
-  const who = name ? `**${name}**` : "A player";
+  const who = name ? `**${escapeMarkdown(name)}**` : "A player";
   postMessage(`${who} disconnected.`).catch(console.error);
 });
 
@@ -152,7 +189,8 @@ watcher.on("version", (version) => {
     const previous = lastKnownVersion;
     saveVersion(version);
     postMessage(
-      `${mentionPrefix()}Server updated: \`${previous}\` → \`${version}\``
+      `${mentionPrefix()}Server updated: \`${previous}\` → \`${version}\``,
+      { mention: true }
     ).catch(console.error);
   }
 });
@@ -167,13 +205,6 @@ watcher.on("joincode", (code) => {
     saveJoinCode(code);
     postMessage(`New join code: \`${code}\``).catch(console.error);
   }
-});
-
-watcher.on("error", (err) => {
-  console.error("Log watcher error:", err);
-  postMessage(
-    "⚠️ Lost track of the server log — player list may be out of sync until the bot restarts."
-  ).catch(console.error);
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -226,9 +257,16 @@ async function requireAdmin(interaction) {
 // the host running `docker compose up` can, so say so plainly instead of
 // a generic failure. Every other error's own message gets surfaced too -
 // no more "check bot logs" as the only signal for what actually happened.
+// The second-copy hint is from a real incident: a stray bot instance on
+// another machine (same token, no game server on its Docker host) kept
+// answering commands with this 404 while the real server was fine.
 function describeDockerError(err) {
   if (err.statusCode === 404) {
-    return "Server container doesn't exist — it needs to be recreated on the host (`docker compose up -d`), not something I can do remotely.";
+    return (
+      `Server container \`${VALHEIM_CONTAINER_NAME}\` doesn't exist on this bot's Docker host — ` +
+      "it needs to be recreated on the host (`docker compose up -d`), not something I can do remotely. " +
+      "If the server is actually up, check for a second copy of this bot running on another machine."
+    );
   }
   return `Error talking to the server container: ${err.message}`;
 }
@@ -239,7 +277,7 @@ async function handleCommand(interaction) {
     try {
       const status = await getContainerStatus(VALHEIM_CONTAINER_NAME);
       if (status.running) {
-        await interaction.editReply(`${mentionPrefix()}Restarting the server...`);
+        await interaction.editReply(withMention("Restarting the server..."));
         await restartContainer(VALHEIM_CONTAINER_NAME);
       } else {
         // restart() would actually still work here (confirmed: Docker
@@ -247,7 +285,7 @@ async function handleCommand(interaction) {
         // "restarting" when it was actually off is exactly the confusing
         // messaging this command used to have. Say what's really happening.
         await interaction.editReply(
-          `${mentionPrefix()}Server was stopped — starting it now...`
+          withMention("Server was stopped — starting it now...")
         );
         await startContainer(VALHEIM_CONTAINER_NAME);
       }
@@ -266,7 +304,7 @@ async function handleCommand(interaction) {
         await interaction.editReply("Server is already running.");
         return;
       }
-      await interaction.editReply(`${mentionPrefix()}Starting the server...`);
+      await interaction.editReply(withMention("Starting the server..."));
       await startContainer(VALHEIM_CONTAINER_NAME);
     } catch (err) {
       console.error("Start failed:", err);
@@ -283,7 +321,7 @@ async function handleCommand(interaction) {
         await interaction.editReply("Server is already stopped.");
         return;
       }
-      await interaction.editReply(`${mentionPrefix()}Stopping the server...`);
+      await interaction.editReply(withMention("Stopping the server..."));
       await stopContainer(VALHEIM_CONTAINER_NAME);
     } catch (err) {
       console.error("Stop failed:", err);
@@ -317,7 +355,7 @@ async function handleCommand(interaction) {
         await interaction.editReply(`Server is **offline** (${status.status}).`);
         return;
       }
-      const names = watcher.currentNames();
+      const names = watcher.currentNames().map(escapeMarkdown);
       await interaction.editReply(
         `Server is **online**. ` +
           (names.length
@@ -348,7 +386,7 @@ async function handleCommand(interaction) {
       await interaction.editReply(describeDockerError(err));
       return;
     }
-    const names = watcher.currentNames();
+    const names = watcher.currentNames().map(escapeMarkdown);
     await interaction.editReply(
       names.length
         ? `**${names.length}** player(s) online: ${names.join(", ")}`

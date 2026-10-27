@@ -32,12 +32,17 @@ const COUNT_RE = /now (\d+) player\(s\)/;
 // "Valheim version: l-1.0.7 (network version 39)"
 const VERSION_RE = /Valheim version: l-([\d.]+)/;
 
-// "Created new join code 460594 for session "MyServer""
+// "Session "MyServer" registered with join code 075304" (current builds)
+// "Created new join code 460594 for session "MyServer"" (older builds)
 // This is the cross-platform (Steam/Xbox/PlayStation alike) code players
 // enter in-game to connect - unlike a steam:// deeplink, it works for
 // every platform on a crossplay server. Gets recreated each time the
-// server starts a new session, so it changes on every restart.
-const JOIN_CODE_RE = /Created new join code (\d+) for session/;
+// server starts a new session, so it changes on every restart. Confirmed
+// against real logs (Valheim 1.0.20) that the older wording no longer
+// appears at all - matching only it silently left /connect handing out a
+// stale code. Requires digits, so "...that has join code , now 0
+// player(s)" (printed before a code is assigned) can't match.
+const JOIN_CODE_RE = /(?:registered with|Created new) join code (\d+)/;
 
 // "09/12/2026 11:57:34: ..." - present on most lines, but not all (some,
 // like "ZPlayFabSocket::Dispose. State: CONNECTED", have no timestamp).
@@ -93,6 +98,7 @@ function parseTimestamp(line, timeZone) {
 }
 
 const REPLAY_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
+const TAIL_RESTART_DELAY_MS = 5000;
 
 export class LogWatcher extends EventEmitter {
   constructor(logPath, timeZone = "UTC") {
@@ -119,18 +125,35 @@ export class LogWatcher extends EventEmitter {
     // game server restart, so "everything currently in the file" is
     // exactly the current session's history - no more, no less.
     this._replayExisting();
+    this._spawnTail();
+  }
 
+  _spawnTail() {
     // -F (not -f): re-opens by filename if the log gets truncated/replaced,
     // which happens on every container restart.
-    this.proc = spawn("tail", ["-n", "0", "-F", this.logPath]);
-    const rl = createInterface({ input: this.proc.stdout });
+    const proc = spawn("tail", ["-n", "0", "-F", this.logPath]);
+    this.proc = proc;
+    const rl = createInterface({ input: proc.stdout });
     rl.on("line", (line) => this._handleLine(line));
-    this.proc.on("exit", (code) => {
-      this.emit("error", new Error(`tail exited with code ${code}`));
-    });
-    this.proc.stderr.on("data", (chunk) => {
+    proc.stderr.on("data", (chunk) => {
       console.error("tail stderr:", chunk.toString().trim());
     });
+
+    // Respawn rather than give up: previously a dead tail meant player
+    // tracking stayed off until someone noticed and restarted the whole
+    // bot. Lines written during the gap are missed (-n 0), but the next
+    // COUNT_RE reconcile corrects the roster size. Both 'error' (spawn
+    // failure - unhandled, it would crash the process) and 'exit' can
+    // fire for the same proc, so only the first one schedules a respawn.
+    let respawning = false;
+    const respawn = (reason) => {
+      if (respawning || this._stopped) return;
+      respawning = true;
+      console.error(`tail ${reason} - restarting in ${TAIL_RESTART_DELAY_MS / 1000}s`);
+      this._respawnTimer = setTimeout(() => this._spawnTail(), TAIL_RESTART_DELAY_MS);
+    };
+    proc.on("error", (err) => respawn(`failed: ${err.message}`));
+    proc.on("exit", (code) => respawn(`exited with code ${code}`));
   }
 
   _replayExisting() {
@@ -165,7 +188,7 @@ export class LogWatcher extends EventEmitter {
       // all: skip rather than guess: real join/leave/version/join-code
       // lines always carry one in practice.
       if (!current || current < cutoff) continue;
-      this._handleLine(line, { silent: true });
+      this._handleLine(line, { silent: true, now: current.getTime() });
     }
 
     console.log(
@@ -176,6 +199,8 @@ export class LogWatcher extends EventEmitter {
   }
 
   stop() {
+    this._stopped = true;
+    clearTimeout(this._respawnTimer);
     this.proc?.kill();
   }
 
@@ -187,8 +212,12 @@ export class LogWatcher extends EventEmitter {
   // startup - see _replayExisting) rebuilds internal state exactly as
   // normal, it just skips emitting events so catching up on history
   // already known to the server doesn't spam Discord with stale
-  // announcements.
-  _handleLine(line, { silent = false } = {}) {
+  // announcements. `now` is the line's own time: real time when live, but
+  // the log timestamp during replay - replay chews through hours of log
+  // in milliseconds, so timing the leave-lobby dedupe below by Date.now()
+  // there made every leave after the first precise one look like a
+  // duplicate, leaving ghost entries in the rebuilt roster.
+  _handleLine(line, { silent = false, now = Date.now() } = {}) {
     let m;
 
     if ((m = line.match(JOIN_RE))) {
@@ -238,7 +267,7 @@ export class LogWatcher extends EventEmitter {
       const name = this.players.get(zdoid);
       if (name) {
         this.players.delete(zdoid);
-        this._recentRemovalAt = Date.now();
+        this._recentRemovalAt = now;
         if (!silent) this.emit("leave", { name, players: this.currentNames() });
       }
       return;
@@ -246,7 +275,7 @@ export class LogWatcher extends EventEmitter {
 
     if (LEAVE_LOBBY_RE.test(line)) {
       // Already handled a moment ago via the precise zdo-owner match above.
-      if (Date.now() - this._recentRemovalAt < 2000) return;
+      if (now - this._recentRemovalAt < 2000) return;
 
       if (this.players.size === 1) {
         // Unambiguous: only one player tracked, it must be them.

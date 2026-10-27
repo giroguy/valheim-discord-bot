@@ -152,7 +152,10 @@ window survive a bot restart.
    explain where to find each value. `ADMIN_ROLE_ID` and
    `UPDATE_MENTION_ROLE_ID` accept either a role **name** or its numeric ID
    (plus `@here`/`@everyone` for the mention one) - no need to enable
-   Developer Mode just to copy a snowflake ID.
+   Developer Mode just to copy a snowflake ID. Prefer the ID for
+   `ADMIN_ROLE_ID`, though: with a name, anyone who can create roles can
+   make one with the same name and pass the admin check (the bot logs a
+   warning at startup when it's a name).
 
 3. **Configure paths**: copy `.env.example` to `.env` (compose-level
    interpolation, different from `valheim-bot.env`) and set
@@ -216,6 +219,23 @@ actually recurred in production even with the try/catch already in place
 (same command, same error code, a few hours later) - the defer-first
 change is the actual fix, not just damage control.
 
+The other cause of `Unknown interaction` (and of bogus "container doesn't
+exist" replies) found in production: a **second copy of the bot** running
+on another machine with the same token. Discord delivers every command to
+both; whichever acks first wins, and the loser logs `Unknown interaction`.
+If replies look contradictory, check no other host is running this bot.
+
+If the `tail` process dies, `LogWatcher` respawns it after 5 seconds
+rather than leaving player tracking off until the next bot restart.
+
+## Mentions
+
+Player names come straight from the game, so all bot messages (webhook
+posts and command replies) are sent with mentions disabled and names
+markdown-escaped - a character named `@everyone` can't ping the server.
+Mentions are re-enabled only on messages that lead with our own
+`UPDATE_MENTION_ROLE_ID` prefix (version updates, start/stop/restart).
+
 ## Restart mechanism and its trust boundary
 
 `/restart`, `/start`, `/stop`, and `/status` mount `/var/run/docker.sock`
@@ -243,6 +263,10 @@ and that `restart()` actually succeeds even on a stopped container - the
 `/restart` handler still checks status first anyway, purely so its
 progress message says "starting" instead of the misleading "restarting"
 when the server was actually off.
+
+`stop` and `restart` give the game server 60 seconds
+(`STOP_TIMEOUT_SECONDS`) to shut down after its stop signal before Docker
+kills it - Docker's default of 10s can cut Valheim off mid world-save.
 
 ## Multiple servers
 
